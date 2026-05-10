@@ -1293,6 +1293,49 @@ select{appearance:none;cursor:pointer}
 
 <!-- ═══ JAVASCRIPT ═══ -->
 <script>
+// ── Buffer polyfill (Node.js Buffer no existe en el browser) ──────────────
+if (typeof Buffer === 'undefined') {
+  window.Buffer = {
+    from: function(data, encoding) {
+      if (Array.isArray(data)) return new Uint8Array(data);
+      if (data instanceof Uint8Array) return new Uint8Array(data);
+      if (typeof data === 'string') {
+        if (encoding === 'hex') {
+          const bytes = new Uint8Array(data.length / 2);
+          for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(data.substr(i*2,2),16);
+          return bytes;
+        }
+        // utf8 / default
+        return new TextEncoder().encode(data);
+      }
+      return new Uint8Array(data);
+    },
+    alloc: function(size, fill) {
+      const buf = new Uint8Array(size);
+      // Add write methods
+      buf.writeBigUInt64LE = function(val, offset = 0) {
+        let v = BigInt(val);
+        for (let i = 0; i < 8; i++) { this[offset + i] = Number(v & 0xffn); v >>= 8n; }
+      };
+      buf.writeUInt16LE = function(val, offset = 0) {
+        this[offset] = val & 0xff; this[offset+1] = (val >> 8) & 0xff;
+      };
+      buf.writeUInt32LE = function(val, offset = 0) {
+        this[offset] = val & 0xff; this[offset+1] = (val>>8)&0xff; this[offset+2] = (val>>16)&0xff; this[offset+3] = (val>>24)&0xff;
+      };
+      if (fill !== undefined) buf.fill(fill);
+      return buf;
+    },
+    concat: function(list, totalLength) {
+      const len = totalLength !== undefined ? totalLength : list.reduce((a, b) => a + b.length, 0);
+      const result = new Uint8Array(len);
+      let offset = 0;
+      for (const buf of list) { result.set(buf, offset); offset += buf.length; }
+      return result;
+    }
+  };
+}
+
 const SUPABASE_URL = 'https://sgcdbwvhvufyokutjtez.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnY2Rid3ZodnVmeW9rdXRqdGV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyODQ1OTksImV4cCI6MjA5Mzg2MDU5OX0.Q73kaoEpWFj6G78Jn9OI3I6mkpE2czn8W4le6kAfL5I';
 const SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnY2Rid3ZodnVmeW9rdXRqdGV6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODI4NDU5OSwiZXhwIjoyMDkzODYwNTk5fQ.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnY2Rid3ZodnVmeW9rdXRqdGV6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODI4NDU5OSwiZXhwIjoyMDkzODYwNTk5fQ.gP2wcm8G4EYKJbucdFUeG9b8a_-rc8XJ6E_sj1gXI6E';
@@ -1417,12 +1460,27 @@ async function initApp() {
   if (error && error.code === '42P01') { hideLoading(); goTo('screen-setup'); return; }
   await checkAndSeed();
   setLoadingStatus('Verificando sesión...');
-  const { data:{ session } } = await db.auth.getSession();
-  if (session) { currentUser = session.user; await loadProfile(); }
+  let session = null;
+  try {
+    const sessionRes = await db.auth.getSession();
+    session = sessionRes?.data?.session || null;
+  } catch(e) { session = null; }
+  // Si el refresh token expiró o es inválido, limpiamos la sesión silenciosamente
+  if (session) {
+    try { currentUser = session.user; await loadProfile(); }
+    catch(e) { await db.auth.signOut().catch(()=>{}); currentUser = null; session = null; }
+  } else {
+    // Asegurarse de limpiar cualquier sesión rota del localStorage
+    await db.auth.signOut().catch(()=>{});
+  }
   loadLandingStats();
   hideLoading();
   if (currentUser && currentProfile) redirectByRole(); else goTo('screen-landing');
   db.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'TOKEN_REFRESHED' && !session) {
+      // Token inválido — cerrar sesión silenciosamente
+      currentUser = null; currentProfile = null; currentTechnician = null; updateNavBadges(); goTo('screen-landing'); return;
+    }
     if (event === 'SIGNED_IN' && session) {
       currentUser = session.user; await loadProfile(); updateNavBadges(); redirectByRole();
     } else if (event === 'SIGNED_OUT') {
@@ -3015,9 +3073,9 @@ function triggerChatPayment() {
 // ════════════════════════════════════════════════════════════════════════════
 
 // Program ID del contrato deployado (reemplazar con el real tras deploy)
-const GOFIX_PROGRAM_ID = 'GoFix1111111111111111111111111111111111111111';
+const GOFIX_PROGRAM_ID = 'HsLizptS6a98iQuUydcJ1d9cqn2Tz7Rb5cGmwVNVVN2s';
 // Treasury de la plataforma (reemplazar con la wallet real)
-const GOFIX_TREASURY = '11111111111111111111111111111111';
+const GOFIX_TREASURY = 'HiZgimCEAq6h1BpueBcoPJUCCD7EKrgdYCmSrA7xivzk';
 // Comisión de la plataforma: 500 basis points = 5%
 const GOFIX_COMMISSION_BPS = 500;
 
@@ -3027,12 +3085,12 @@ const GOFIX_COMMISSION_BPS = 500;
 // Se calculan como sha256("global:<instruction_name>")[0..8]
 // Para simulación en Devnet usamos valores placeholder conocidos
 const INSTRUCTION_DISCRIMINATORS = {
-  create_job:           Buffer.from([24, 30, 200, 42, 1, 115, 5, 95]),
-  accept_job:           Buffer.from([167, 89, 130, 201, 45, 11, 97, 220]),
-  complete_job:         Buffer.from([92, 45, 113, 8, 201, 77, 33, 184]),
-  release_funds:        Buffer.from([138, 222, 18, 77, 90, 5, 144, 222]),
-  dispute_job:          Buffer.from([55, 190, 44, 7, 99, 201, 85, 12]),
-  cancel_job:           Buffer.from([212, 7, 77, 90, 144, 33, 18, 45]),
+  create_job:    Buffer.from([24,  30,  200, 40,  81,  224, 3,   72 ]),
+  accept_job:    Buffer.from([166, 118, 35,  6,   79,  226, 132, 233]),
+  complete_job:  Buffer.from([245, 7,   213, 185, 196, 67,  224, 6  ]),
+  release_funds: Buffer.from([139, 115, 247, 19,  218, 47,  72,  55 ]),
+  cancel_job:    Buffer.from([252, 180, 239, 100, 15,  198, 90,  214]),
+  dispute_job:   Buffer.from([7,   233, 64,  165, 215, 136, 206, 222]),
 };
 
 // Serializar u64 en little-endian (8 bytes)
